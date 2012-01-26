@@ -1,0 +1,101 @@
+#!/usr/bin/perl
+
+use strict;
+use warnings;
+
+use File::Find;
+use File::Spec;
+use File::Path;
+
+use Cwd 'abs_path';
+use Getopt::Long;
+
+use XML::LibXML;
+use XML::Writer;
+
+use IO::File;
+
+my ($from, $to, $tag);
+GetOptions("tag=s" => \$tag, "from=s" => \$from, "to=s" => \$to);
+if (!$from || !$to || !$tag) {
+    usage();
+}
+$to = abs_path($to);
+
+find({ wanted => \&wanted, follow => 1 }, $from);
+
+sub wanted {
+    # Only cares about 'strings.xml' files
+    return unless $_ =~ /^strings.xml$/;
+
+    # Parse the file and look for the requested name tag
+    my $parser = XML::LibXML->new;
+    my $doc = $parser->parse_file($_);
+    my ($elem) = $doc->findnodes("//string[\@name='$tag']/text()");
+    # Skip file if the tag is not present
+    return unless $elem;
+    
+    # extract the value string
+    my $value = $elem->data;
+
+    # Create output dir if needed
+    my @path = File::Spec->splitdir($File::Find::dir);
+    my $dir = File::Spec->catfile($to, $path[-1]);
+    File::Path->make_path($dir, { mode => 0777 }) unless -d "$dir";
+
+    # Build the output file path
+    my $file = File::Spec->catfile($dir, "strings.xml");
+    if (-e $file) {
+	# The file exists. Insert the tag + value from the source
+
+	# Parse the existing file
+	my $doc = $parser->parse_file($file);
+
+	# Check if tag is already present
+	my @items = $doc->findnodes("//string[\@name='$tag']");
+	if (scalar(@items) > 0) {
+	    # tag present, print warning and continue
+	    print "Warning! tag $tag already present in $file\n";
+	    return;
+	}
+
+	# Find the parent node and create and insert the new node
+	my ($parent) = $doc->findnodes("//resources");
+	my $string = $parser->parse_balanced_chunk("<string name=\"$tag\">$value</string>");
+	$parent->appendChild($string);
+	
+	# Output the result
+	open OUTPUT, ">$file" or die "cannot open \'$file\' for writing\n";
+	print OUTPUT $doc->toString();
+	close OUTPUT;
+    } else {
+	print "create: ", $file, "\n";
+	
+	my $output = new IO::File(">$file");
+	my $doc = XML::Writer->new(OUTPUT => $output, ENCODING => "utf-8");
+	
+	# Output new xml file
+	$doc->xmlDecl("utf-8");
+	$doc->startTag("resources", "xmlns:xliff" => "urn:oasis:names:tc:xliff:document:1.2");
+	$doc->dataElement("string", $value, "name" => $tag);
+	$doc->endTag("resources");
+	$doc->end();
+	$output->close();
+    }
+
+    # Pretty-print the output file
+    my $out = `xmllint --format $file`;
+    open OUTPUT, ">$file" or die "cannot open \'$file\' for writing\n";
+    print OUTPUT $out;
+    close OUTPUT;
+}
+
+sub usage {
+    my ($msg) = @_;
+
+    if ($msg) {
+	print "error: $msg\n";
+    }
+    print "usage: $0 --tag <tag> --from <from path> --to <to-path>\n";
+    exit(1);
+}
