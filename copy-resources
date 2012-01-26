@@ -31,12 +31,14 @@ sub wanted {
     # Parse the file and look for the requested name tag
     my $parser = XML::LibXML->new;
     my $doc = $parser->parse_file($_);
-    my ($elem) = $doc->findnodes("//string[\@name='$tag']/text()");
+    my ($elem1) = $doc->findnodes("//comment()[following-sibling::string[1][\@name = '$tag']]");
+    my ($elem2) = $doc->findnodes("//string[\@name='$tag']/text()");
     # Skip file if the tag is not present
-    return unless $elem;
+    return unless $elem2;
     
     # extract the value string
-    my $value = $elem->data;
+    my $comment = $elem1->data if $elem1;
+    my $value = $elem2->data;
 
     # Create output dir if needed
     my @path = File::Spec->splitdir($File::Find::dir);
@@ -61,6 +63,10 @@ sub wanted {
 
 	# Find the parent node and create and insert the new node
 	my ($parent) = $doc->findnodes("//resources");
+	if ($comment) {
+	    my $comment_string = $parser->parse_balanced_chunk("<!--$comment-->");
+	    $parent->appendChild($comment_string);
+	}
 	my $string = $parser->parse_balanced_chunk("<string name=\"$tag\">$value</string>");
 	$parent->appendChild($string);
 	
@@ -69,14 +75,13 @@ sub wanted {
 	print OUTPUT $doc->toString();
 	close OUTPUT;
     } else {
-	print "create: ", $file, "\n";
-	
 	my $output = new IO::File(">$file");
 	my $doc = XML::Writer->new(OUTPUT => $output, ENCODING => "utf-8");
 	
 	# Output new xml file
 	$doc->xmlDecl("utf-8");
 	$doc->startTag("resources", "xmlns:xliff" => "urn:oasis:names:tc:xliff:document:1.2");
+	$doc->comment($comment);
 	$doc->dataElement("string", $value, "name" => $tag);
 	$doc->endTag("resources");
 	$doc->end();
