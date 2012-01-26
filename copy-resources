@@ -15,9 +15,13 @@ use XML::Writer;
 
 use IO::File;
 
-my ($from, $to, $tag);
-GetOptions("tag=s" => \$tag, "from=s" => \$from, "to=s" => \$to);
-if (!$from || !$to || !$tag) {
+my ($from, $to, $tag, $tagout, $restype);
+GetOptions("tag=s" => \$tag, 
+	   "tagout=s" => \$tagout, 
+	   "restype=s" => \$restype, 
+	   "from=s" => \$from, 
+	   "to=s" => \$to);
+if (!$from || !$to || !$tag || !$tagout) {
     usage();
 }
 $to = abs_path($to);
@@ -37,13 +41,15 @@ sub wanted {
     return unless $elem2;
     
     # extract the value string
-    my $comment = $elem1->data if $elem1;
+    my $comment_text = $elem1->data if $elem1;
     my $value = $elem2->data;
 
     # Create output dir if needed
     my @path = File::Spec->splitdir($File::Find::dir);
     my $dir = File::Spec->catfile($to, $path[-1]);
     File::Path->make_path($dir, { mode => 0777 }) unless -d "$dir";
+    
+    my $add_res = 1 if ($path[-1] eq "values");
 
     # Build the output file path
     my $file = File::Spec->catfile($dir, "strings.xml");
@@ -52,9 +58,11 @@ sub wanted {
 
 	# Parse the existing file
 	my $doc = $parser->parse_file($file);
+#	my $xpc = XML::LibXML::XPathContext->new($doc);
+#	$xpc->registerNs(xliff => 'urn:oasis:names:tc:xliff:document:1.2');
 
 	# Check if tag is already present
-	my @items = $doc->findnodes("//string[\@name='$tag']");
+	my @items = $doc->findnodes("//string[\@name='$tagout']");
 	if (scalar(@items) > 0) {
 	    # tag present, print warning and continue
 	    print "Warning! tag $tag already present in $file\n";
@@ -63,13 +71,20 @@ sub wanted {
 
 	# Find the parent node and create and insert the new node
 	my ($parent) = $doc->findnodes("//resources");
-	if ($comment) {
-	    my $comment_string = $parser->parse_balanced_chunk("<!--$comment-->");
-	    $parent->appendChild($comment_string);
+	if ($comment_text) {
+	    my $comment = XML::LibXML::Comment->new($comment_text);
+	    $parent->appendChild($comment);
 	}
-	my $string = $parser->parse_balanced_chunk("<string name=\"$tag\">$value</string>");
+
+	my $string = $doc->createElement("string");
+	$string->setAttribute("name", $tagout);
+	if ($add_res) {
+	    $string->setAttribute("xliff:restype", $restype);	
+	}
+	my $text = XML::LibXML::Text->new($value);
+	$string->appendChild($text);
 	$parent->appendChild($string);
-	
+
 	# Output the result
 	open OUTPUT, ">$file" or die "cannot open \'$file\' for writing\n";
 	print OUTPUT $doc->toString();
@@ -81,8 +96,12 @@ sub wanted {
 	# Output new xml file
 	$doc->xmlDecl("utf-8");
 	$doc->startTag("resources", "xmlns:xliff" => "urn:oasis:names:tc:xliff:document:1.2");
-	$doc->comment($comment);
-	$doc->dataElement("string", $value, "name" => $tag);
+	$doc->comment($comment_text);
+	if ($add_res) {
+	    $doc->dataElement("string", $value, "name" => $tagout, "xliff:restype" => $restype);
+	} else {
+	    $doc->dataElement("string", $value, "name" => $tagout);
+	}
 	$doc->endTag("resources");
 	$doc->end();
 	$output->close();
@@ -101,6 +120,6 @@ sub usage {
     if ($msg) {
 	print "error: $msg\n";
     }
-    print "usage: $0 --tag <tag> --from <from path> --to <to-path>\n";
+    print "usage: $0 --tag <tag> --tagout <tag> --from <path> --to <path>\n";
     exit(1);
 }
