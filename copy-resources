@@ -11,9 +11,6 @@ use Cwd 'abs_path';
 use Getopt::Long;
 
 use XML::LibXML;
-use XML::Writer;
-
-use IO::File;
 
 my ($from, $to, $tag, $tagout, $restype);
 GetOptions("tag=s" => \$tag, 
@@ -21,97 +18,165 @@ GetOptions("tag=s" => \$tag,
 	   "restype=s" => \$restype, 
 	   "from=s" => \$from, 
 	   "to=s" => \$to);
-if (!$from || !$to || !$tag || !$tagout) {
-    usage();
-}
+usage() unless $from;
+usage() unless -d $from;
+usage() unless $to;
+usage() unless $tag;
+
 $to = abs_path($to);
+$tagout = $tag unless $tagout;
+
+my $parser = XML::LibXML->new;
 
 find({ wanted => \&wanted, follow => 1 }, $from);
 
+#
 sub wanted {
-    # Only cares about 'strings.xml' files
-    return unless $_ =~ /^strings.xml$/;
+    # Only care about 'strings.xml' files
+    return unless $_ =~ /^strings\.xml$/;
 
-    # Parse the file and look for the requested name tag
-    my $parser = XML::LibXML->new;
-    my $doc = $parser->parse_file($_);
-    my ($elem1) = $doc->findnodes("//comment()[following-sibling::string[1][\@name = '$tag']]");
-    my ($elem2) = $doc->findnodes("//string[\@name='$tag']/text()");
-    # Skip file if the tag is not present
-    return unless $elem2;
-    
-    # extract the value string
-    my $comment_text = $elem1->data if $elem1;
-    my $value = $elem2->data;
-
-    # Create output dir if needed
-    my @path = File::Spec->splitdir($File::Find::dir);
-    my $dir = File::Spec->catfile($to, $path[-1]);
-    File::Path->make_path($dir, { mode => 0777 }) unless -d "$dir";
-    
-    my $add_res = 1 if ($path[-1] eq "values");
-
-    # Build the output file path
-    my $file = File::Spec->catfile($dir, "strings.xml");
-    if (-e $file) {
-	# The file exists. Insert the tag + value from the source
-
-	# Parse the existing file
-	my $doc = $parser->parse_file($file);
-#	my $xpc = XML::LibXML::XPathContext->new($doc);
-#	$xpc->registerNs(xliff => 'urn:oasis:names:tc:xliff:document:1.2');
-
-	# Check if tag is already present
-	my @items = $doc->findnodes("//string[\@name='$tagout']");
-	if (scalar(@items) > 0) {
-	    # tag present, print warning and continue
-	    print "Warning! tag $tag already present in $file\n";
-	    return;
-	}
-
-	# Find the parent node and create and insert the new node
-	my ($parent) = $doc->findnodes("//resources");
-	if ($comment_text) {
-	    my $comment = XML::LibXML::Comment->new($comment_text);
-	    $parent->appendChild($comment);
-	}
-
-	my $string = $doc->createElement("string");
-	$string->setAttribute("name", $tagout);
-	if ($add_res) {
-	    $string->setAttribute("xliff:restype", $restype);	
-	}
-	my $text = XML::LibXML::Text->new($value);
-	$string->appendChild($text);
-	$parent->appendChild($string);
-
-	# Output the result
-	open OUTPUT, ">$file" or die "cannot open \'$file\' for writing\n";
-	print OUTPUT $doc->toString();
-	close OUTPUT;
-    } else {
-	my $output = new IO::File(">$file");
-	my $doc = XML::Writer->new(OUTPUT => $output, ENCODING => "utf-8");
-	
-	# Output new xml file
-	$doc->xmlDecl("utf-8");
-	$doc->startTag("resources", "xmlns:xliff" => "urn:oasis:names:tc:xliff:document:1.2");
-	$doc->comment($comment_text);
-	if ($add_res) {
-	    $doc->dataElement("string", $value, "name" => $tagout, "xliff:restype" => $restype);
-	} else {
-	    $doc->dataElement("string", $value, "name" => $tagout);
-	}
-	$doc->endTag("resources");
-	$doc->end();
-	$output->close();
+    my ($comment, $string) = process_input_file($_, $tag);
+    if (!$string) {
+	print STDERR "info: '$tag' not found in '$_'\n";
+	return;
     }
 
-    # Pretty-print the output file
+    fix_tag_and_restype($string, $tagout, $restype);
+
+    my $file = get_output_path($File::Find::dir, $to, $_);
+
+    my $doc = get_document($file);
+    my $xml = create_xml($doc, $comment, $string);
+
+    # Output the result
+    open OUTPUT, ">$file" or die "cannot open \'$file\' for writing\n";
+    print OUTPUT $xml;
+    close OUTPUT;
+
+    # Pretty-print the file
     my $out = `xmllint --format $file`;
+    print $out;
     open OUTPUT, ">$file" or die "cannot open \'$file\' for writing\n";
     print OUTPUT $out;
     close OUTPUT;
+}
+
+sub fix_tag_and_restype($$$) {
+    my ($string, $tagout, $restype) = @_;
+    
+    $string->setAttribute("name", $tagout);
+    if ($restype && $string->hasAttribute("xliff:restype")) {
+	$string->setAttribute("xliff:restype", $restype);
+    }
+}
+
+# Reads an xml file and looks for string elements that have a name attribute 
+# with the given value and returns a comment and element.
+sub process_input_file($$) {
+    ($from, $tag) = @_;
+
+    # Parse the input file and look for the requested name tag
+    my $doc = $parser->parse_file($from);
+
+    my @strings = $doc->findnodes("//string[\@name='$tag']");
+    my $count = scalar @strings;
+    if ($count == 0) { # The tag is not present
+	return undef;
+    }
+    if ($count > 1) { # This is an error case. 
+	print STDERR "Warning: More than one '<string>' element in file '$from' has the name attibute '$tag'\n"; 
+	return undef;
+    }
+
+    # Get the comments immediately preceding the wanted node
+    my @comments = $doc->findnodes("//comment()[following-sibling::string[1][\@name = '$tag']]");
+    if (scalar @comments > 1) {
+	print STDERR "Warning: More than one comment!\n";
+    }
+    
+    return ($comments[0]->cloneNode(1), $strings[0]->cloneNode(1));
+}
+
+# Will construct a filename that will contain the output. Any directories 
+# on the path will be created if they don't exist.
+sub get_output_path($$$) {
+    my ($src_path, $to_path, $filename) = @_;
+
+    # Figure out what the target dir is
+    my @path_elements = File::Spec->splitdir($src_path);
+    my $target_dir = File::Spec->catfile($to_path, $path_elements[-1]);
+    
+    # Create output dir if needed
+    File::Path->make_path($target_dir, { mode => 0777 }) unless -d "$target_dir";
+
+    return File::Spec->catfile($target_dir, $filename);
+}
+
+sub get_document($) {
+    my ($file) = @_;
+
+    my $doc;
+    if (-e $file) {
+	$doc = $parser->parse_file($file);
+    } else {
+	$doc = XML::LibXML::Document->createDocument("1.0", "utf-8");
+	my $res = $doc->createElement("resources");
+	$doc->setDocumentElement($res);
+    }
+    return $doc;
+}
+
+sub create_xml($$$) {
+    my ($doc, $comment, $string) = @_;
+    
+    $doc->adoptNode($comment);
+    $doc->adoptNode($string);
+
+    my ($res) = $doc->findnodes("//resources");
+    if (!defined $res) { # Error
+	print STDERR "Error: No valid root node found\n";
+    }
+
+    my @nss = $string->getNamespaces;
+    foreach my $ns (@nss) {
+	$res->setNamespace($ns->getValue, $ns->getLocalName, 0);
+    }
+
+    # Check if tag output is already present
+    my @items = $doc->findnodes("//string[\@name='$tagout']");
+    my $count = scalar @items;
+    if ($count == 0) { # Insert
+	$res->appendChild($comment);
+	$res->appendChild($string);
+    } 
+    if ($count == 1) { 	# Update
+	$items[0]->replaceNode($string)
+    } 
+    if ($count > 1) { # Error/Warning
+	print STDERR "Warning: Tag present more than 1 time in target\n";
+	return;
+    }
+    my $name = $string->getAttribute("name");
+    print $doc->findvalue("//string[\@name='$name']"), "\n";
+    foreach my $i ($string->getChildnodes()) {
+	print "node: ", $i->nodeType, " - ", $i->nodeName, " - ", $i->toString, "\n";
+    }
+
+
+    # Look for string elements with more than one text node. If that is the case 
+    # we iterate over them and get their string representation and convert them to
+    # a text node (which was the intention from the beginning!)
+    my @children = $string->getChildnodes();
+    if (scalar @children > 1 || scalar @children == 1 && $children[0]->nodeType != 3) {
+	my $text = '';
+	foreach my $child (@children) {
+	    $text .= $child->toString;
+	    $string->removeChild($child);
+	}
+	$string->appendTextNode($text);
+    }
+
+    return $doc->toString;
 }
 
 sub usage {
@@ -120,6 +185,6 @@ sub usage {
     if ($msg) {
 	print "error: $msg\n";
     }
-    print "usage: $0 --tag <tag> --tagout <tag> --from <path> --to <path>\n";
+    print "usage: $0 -tag <tag> [-tagout <tag>] [-restype <new restype>] -from <path> -to <path>\n";
     exit(1);
 }
