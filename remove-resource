@@ -1,0 +1,74 @@
+#!/usr/bin/perl
+
+use strict;
+use warnings;
+
+use File::Find;
+use Getopt::Long;
+use XML::LibXML;
+
+sub usage();
+
+my ($from, $to, $tag, $tagout, $restype);
+GetOptions("tag=s" => \$tag, 
+	   "from=s" => \$from);
+
+usage() unless $from;
+usage() unless -d $from;
+usage() unless $tag;
+
+my $parser = XML::LibXML->new;
+
+find({ wanted => \&wanted, follow => 1 }, $from);
+
+#
+sub wanted {
+    # Only care about 'strings.xml' files
+    return unless $_ =~ /^strings\.xml$/;
+
+    my $doc = remove_tag($_, $tag);
+    if (!$doc) {
+	print STDERR "info: '$tag' not found in '$_'\n";
+	return;
+    }
+
+    # Output the result
+    open OUTPUT, ">$_" or die "cannot open \'$_\' for writing\n";
+    print OUTPUT $doc->toString;
+    close OUTPUT;
+
+    # Pretty-print the file
+    my $out = `xmllint --format $_`;
+    open OUTPUT, ">$_" or die "cannot open \'$_\' for writing\n";
+    print OUTPUT $out;
+    close OUTPUT;
+}
+
+sub remove_tag($$) {
+    ($from, $tag) = @_;
+
+    # Parse the input file and look for the requested name tag
+    my $doc = $parser->parse_file($from);
+
+    my @res = $doc->findnodes('/resources');
+    return undef unless @res;
+    return undef unless scalar @res == 1;
+
+    my @comments = $doc->findnodes("/resources/comment()[following-sibling::string[1][\@name = '$tag']]");
+    foreach my $comment (@comments) {
+	$res[0]->removeChild($comment);
+    }
+    
+    my @strings = $doc->findnodes("/resources/string[\@name='$tag']");
+    return undef if scalar @strings == 0;
+    foreach my $string (@strings) {
+	$res[0]->removeChild($string);
+    }
+
+    return $doc;
+}
+
+sub usage() {
+    print "usage: $0 -tag <tag> -from <path>\n";
+    exit(1);
+}
