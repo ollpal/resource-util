@@ -55,7 +55,6 @@ sub wanted {
 
     # Pretty-print the file
     my $out = `xmllint --format $file`;
-    print $out;
     open OUTPUT, ">$file" or die "cannot open \'$file\' for writing\n";
     print OUTPUT $out;
     close OUTPUT;
